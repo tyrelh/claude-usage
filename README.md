@@ -1,5 +1,7 @@
 # claude-usage
 
+![Screenshot of a small terminal window showing two green bars less than 20% full, first represents the 5-hour window usage and the second represents the 7-day window usage of your Claude plan](./screenshot.png)
+
 Terminal monitor for Claude Code usage limits. Polls the Anthropic OAuth usage endpoint and renders progress bars for 5-hour, 7-day, and (if applicable) extra-credit windows.
 
 ## Requirements
