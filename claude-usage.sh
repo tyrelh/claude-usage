@@ -132,18 +132,26 @@ render_bar() {
 fetch_and_display() {
   if is_expired; then
     refresh_token
+    if is_expired; then
+      # ponytail: dead refresh token can't be fixed here — API 429s expired tokens (~1h retry-after), so don't feed the throttle
+      echo "OAuth token expired and refresh failed. Run 'claude' in a terminal and '/login', then restart this script." >&2
+      return
+    fi
   fi
 
   [[ -t 1 ]] && printf '\033[H\033[2J'
 
   TOKEN=$(read_keychain | jq -r '.claudeAiOauth.accessToken')
 
-  HTTP_CODE=$(curl -sS -o /tmp/claude-usage-body.$$ -w "%{http_code}" \
+  local http_meta
+  http_meta=$(curl -sS -o /tmp/claude-usage-body.$$ -w "%{http_code} %header{retry-after}" \
     https://api.anthropic.com/api/oauth/usage \
     -H "Authorization: Bearer $TOKEN" \
     -H "anthropic-beta: oauth-2025-04-20" \
     -H "Accept: application/json" \
     -H "User-Agent: claude-code/2.0.32")
+  HTTP_CODE=${http_meta%% *}
+  RETRY_AFTER=${http_meta#* }
   RESPONSE=$(cat /tmp/claude-usage-body.$$)
   rm -f /tmp/claude-usage-body.$$
 
@@ -153,7 +161,7 @@ fetch_and_display() {
     local msg
     msg=$(echo "$RESPONSE" | jq -r '.error.message // "rate limited"' 2>/dev/null || echo "rate limited")
     render_header "$header_ts" 0 "$(term_cols)"
-    echo "HTTP 429: $msg" >&2
+    echo "HTTP 429: $msg (retry-after: ${RETRY_AFTER:-?}s — note: the API returns 429, not 401, for expired tokens)" >&2
     return
   fi
 
