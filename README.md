@@ -22,8 +22,10 @@ ditto -x -k agent-usage.zip ~/Applications
 open ~/Applications/agent-usage.app
 ```
 
-- Choose **Always Allow** at the Keychain prompt
+- Open the Claude panel and choose **Reconnect Claude…** if Keychain access is needed. Choose **Always Allow** when prompted.
 - Browser download instead: `xattr -dr com.apple.quarantine ~/Applications/agent-usage.app`
+
+Claude usage is fetched from the subscription API every ten minutes, including usage from other machines. The app caches the access token only in memory until shortly before expiry. Background refreshes never display Keychain prompts or launch Claude CLI. If access or renewal is needed, the panel keeps the last reading and offers **Reconnect Claude…**. Reconnecting can prompt for Keychain access and renew expired credentials through a small Claude CLI prompt that may use plan allowance.
 
 ### Menu bar markers
 
@@ -56,6 +58,10 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
   agent-usage/agent-usage/UsageModels.swift tests/UsageParserChecks.swift \
   -o /tmp/agent-usage-parser-checks
 /tmp/agent-usage-parser-checks
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swiftc \
+  agent-usage/agent-usage/UsageModels.swift agent-usage/agent-usage/UsageClient.swift \
+  tests/UsageClientChecks.swift -o /tmp/agent-usage-client-checks
+/tmp/agent-usage-client-checks
 ```
 
 ## Terminal script

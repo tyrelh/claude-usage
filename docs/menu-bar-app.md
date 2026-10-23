@@ -21,7 +21,7 @@ Each item opens a detail panel for that provider. Show both percentages, reset t
 
 - Fetch directly in Swift using the data sources and parsing rules established by `ai-plan-usage.sh`. Do not require the shell script, `jq`, or `curl` at runtime.
 - Refresh on launch and every ten minutes while running. A manual refresh is available in each detail panel.
-- The Claude login may be refreshed automatically through the Claude CLI, even though the small refresh prompt may consume plan allowance. If the Codex login expires, show instructions to renew it rather than starting Codex in the background.
+- Cache Claude access tokens only in memory until shortly before expiry; keep fetching current subscription usage from the API every ten minutes. Background credential reads must not show Keychain prompts or launch Claude CLI. Offer an explicit Reconnect Claude action to allow Keychain access and renew an expired login through the CLI; the small renewal prompt may consume plan allowance. If the Codex login expires, show instructions to renew it rather than starting Codex in the background.
 - Keep the latest successful reading in memory. Version one has no history or trend charts and sends no notifications.
 - Treat the current usage endpoints as changeable. If a request or response fails, show the failure in the detail panel and preserve a stale reading when one exists.
 

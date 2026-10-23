@@ -47,6 +47,11 @@ struct UsageFailure: LocalizedError, Sendable {
     var errorDescription: String? { message }
 }
 
+struct ClaudeConnectionRequired: LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 // Missing/null windows are legitimate. A missing provider envelope or malformed
 // field is a parsing error, so it cannot replace the last successful reading.
 enum UsageParser {

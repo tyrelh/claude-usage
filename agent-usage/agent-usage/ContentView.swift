@@ -111,7 +111,11 @@ private struct ProviderDetailView: View {
                 }
                 Text("Refreshes every 10 minutes.").font(.caption).foregroundStyle(.secondary)
                 if store.provider == .claude {
-                    Text("Expired logins renew through Claude CLI. Its small prompt may use plan allowance.")
+                    Button("Reconnect Claude…") { store.refresh(reconnectClaude: true) }
+                        .disabled(store.isRefreshing)
+                    Text(store.needsReconnect ? "Reconnect to allow Keychain access or renew your login." : "Background refreshes never ask for your Keychain password.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Text("Reconnecting may ask for Keychain access. Expired logins renew through Claude CLI; its small prompt may use plan allowance.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }

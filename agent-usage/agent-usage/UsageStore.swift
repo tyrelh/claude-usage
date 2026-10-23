@@ -8,6 +8,7 @@ final class ProviderStore {
     private(set) var reading: UsageReading?
     private(set) var error: String?
     private(set) var isRefreshing = false
+    private(set) var needsReconnect = false
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private let client = UsageClient()
 
@@ -20,15 +21,19 @@ final class ProviderStore {
         return reading == nil ? "Waiting for first reading" : "Updated successfully"
     }
 
-    func refresh() {
+    func refresh(reconnectClaude: Bool = false) {
         guard !isRefreshing else { return }
         isRefreshing = true
         onChange?()
         Task {
             do {
-                reading = try await client.fetch(provider)
+                reading = try await client.fetch(provider, reconnectClaude: reconnectClaude)
                 error = nil
-            } catch { self.error = error.localizedDescription }
+                needsReconnect = false
+            } catch {
+                self.error = error.localizedDescription
+                needsReconnect = error is ClaudeConnectionRequired
+            }
             isRefreshing = false
             onChange?()
         }

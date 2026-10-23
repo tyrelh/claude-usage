@@ -1,10 +1,11 @@
 import Foundation
 import Security
+import LocalAuthentication
 import Darwin
 
 actor UsageClient {
     private struct ClaudeCredentials: Decodable {
-        struct OAuth: Decodable { let accessToken: String; let expiresAt: Double }
+        struct OAuth: Decodable, Sendable { let accessToken: String; let expiresAt: Double }
         let claudeAiOauth: OAuth
     }
     private struct CodexCredentials: Decodable {
@@ -12,18 +13,27 @@ actor UsageClient {
         let tokens: Tokens
     }
 
-    func fetch(_ provider: Provider) async throws -> UsageReading {
+    private var cachedClaudeCredentials: ClaudeCredentials.OAuth?
+    private let credentialReader: @Sendable (Bool) throws -> Data
+    private let claudeRenewer: @Sendable () async throws -> Void
+    private let now: @Sendable () -> Date
+    private let requestLoader: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+    init(credentialReader: @escaping @Sendable (Bool) throws -> Data = { try UsageClient.readClaudeKeychain(allowInteraction: $0) },
+         claudeRenewer: @escaping @Sendable () async throws -> Void = { try await UsageClient.renewClaude() },
+         requestLoader: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await UsageClient.loadRequest($0) },
+         now: @escaping @Sendable () -> Date = { Date() }) {
+        self.credentialReader = credentialReader
+        self.claudeRenewer = claudeRenewer
+        self.requestLoader = requestLoader
+        self.now = now
+    }
+
+    func fetch(_ provider: Provider, reconnectClaude: Bool = false) async throws -> UsageReading {
         var request: URLRequest
         switch provider {
         case .claude:
-            var credentials = try readClaudeCredentials()
-            if credentials.expiresAt / 1000 < Date().timeIntervalSince1970 + 60 {
-                try await renewClaude()
-                credentials = try readClaudeCredentials()
-                guard credentials.expiresAt / 1000 > Date().timeIntervalSince1970 + 60 else {
-                    throw UsageFailure(message: "Claude credentials are still expired after automatic renewal. \(provider.loginHelp)")
-                }
-            }
+            let credentials = try await claudeCredentials(allowInteraction: reconnectClaude)
             request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
             request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
             request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
@@ -37,17 +47,16 @@ actor UsageClient {
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 30
-        // An ephemeral session keeps credentials and usage out of disk caches.
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForResource = 45
-        let session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
         let data: Data
         let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        do { (data, response) = try await requestLoader(request) }
         catch { throw UsageFailure(message: "\(provider.name) request failed: \(error.localizedDescription)") }
         guard let response = response as? HTTPURLResponse else {
             throw UsageFailure(message: "\(provider.name) returned a non-HTTP response.")
+        }
+        if provider == .claude && response.statusCode == 401 {
+            cachedClaudeCredentials = nil
+            throw ClaudeConnectionRequired(message: "Claude rejected the saved login. Reconnect Claude to read the current credentials.")
         }
         guard response.statusCode == 200 else {
             let retry = response.value(forHTTPHeaderField: "Retry-After").map { " Retry after: \($0)." } ?? ""
@@ -57,24 +66,75 @@ actor UsageClient {
         return try UsageParser.parse(data, provider: provider)
     }
 
-    private func readClaudeCredentials() throws -> ClaudeCredentials.OAuth {
+    private func claudeCredentials(allowInteraction: Bool) async throws -> ClaudeCredentials.OAuth {
+        if !allowInteraction, let cached = cachedClaudeCredentials, isCurrent(cached) { return cached }
+        cachedClaudeCredentials = nil
+        var credentials = try decodeClaudeCredentials(credentialReader(allowInteraction))
+        if !isCurrent(credentials) {
+            guard allowInteraction else {
+                throw ClaudeConnectionRequired(message: "Claude's login has expired. Reconnect Claude to renew it.")
+            }
+            try await claudeRenewer()
+            credentials = try decodeClaudeCredentials(credentialReader(true))
+            guard isCurrent(credentials) else {
+                throw ClaudeConnectionRequired(message: "Claude credentials are still expired after renewal. \(Provider.claude.loginHelp)")
+            }
+        }
+        cachedClaudeCredentials = credentials
+        return credentials
+    }
+
+    private func isCurrent(_ credentials: ClaudeCredentials.OAuth) -> Bool {
+        credentials.expiresAt / 1000 > now().timeIntervalSince1970 + 60
+    }
+
+    private func decodeClaudeCredentials(_ data: Data) throws -> ClaudeCredentials.OAuth {
+        guard let credentials = try? JSONDecoder().decode(ClaudeCredentials.self, from: data),
+              !credentials.claudeAiOauth.accessToken.isEmpty else {
+            throw ClaudeConnectionRequired(message: "Claude Keychain credentials have an unexpected format. \(Provider.claude.loginHelp)")
+        }
+        return credentials.claudeAiOauth
+    }
+
+    private static func readClaudeKeychain(allowInteraction: Bool) throws -> Data {
+        // Claude uses the legacy login keychain. Suppress its UI as well as the
+        // per-query authentication UI. Restore the process setting before returning;
+        // this synchronous read never suspends while interaction is disabled.
+        var previousInteraction: DarwinBoolean = true
+        if !allowInteraction {
+            guard SecKeychainGetUserInteractionAllowed(&previousInteraction) == errSecSuccess,
+                  SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else {
+                throw ClaudeConnectionRequired(message: "Cannot read Claude credentials silently. Reconnect Claude to allow Keychain access.")
+            }
+        }
+        defer {
+            if !allowInteraction { SecKeychainSetUserInteractionAllowed(previousInteraction.boolValue) }
+        }
+        let context = LAContext()
+        context.interactionNotAllowed = !allowInteraction
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let data = result as? Data else {
             let reason = SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status)"
-            throw UsageFailure(message: "Cannot read Claude Code credentials: \(reason). \(Provider.claude.loginHelp)")
+            throw ClaudeConnectionRequired(message: "Cannot read Claude Code credentials: \(reason). Reconnect Claude to allow access. \(Provider.claude.loginHelp)")
         }
-        guard let credentials = try? JSONDecoder().decode(ClaudeCredentials.self, from: data),
-              !credentials.claudeAiOauth.accessToken.isEmpty else {
-            throw UsageFailure(message: "Claude Keychain credentials have an unexpected format. \(Provider.claude.loginHelp)")
-        }
-        return credentials.claudeAiOauth
+        return data
+    }
+
+    private static func loadRequest(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        // An ephemeral session keeps credentials and usage out of disk caches.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 45
+        let session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        return try await session.data(for: request)
     }
 
     private func readCodexCredentials() throws -> CodexCredentials.Tokens {
@@ -88,7 +148,7 @@ actor UsageClient {
         return credentials.tokens
     }
 
-    private func renewClaude() async throws {
+    private static func renewClaude() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let candidates = [home.appendingPathComponent(".local/bin/claude").path,
                           "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]

@@ -5,7 +5,12 @@ on:
     branches: [main]
     paths:
       - "agent-usage/**"
-      - "tests/UsageParserChecks.swift"
+      - "tests/**"
+      - ".github/workflows/build-agent-usage.yml"
+  pull_request:
+    paths:
+      - "agent-usage/**"
+      - "tests/**"
       - ".github/workflows/build-agent-usage.yml"
   workflow_dispatch:
 
@@ -14,7 +19,7 @@ permissions:
 
 # Only the newest push matters for a rolling release.
 concurrency:
-  group: build-agent-usage
+  group: build-agent-usage-${{ github.event.pull_request.number || 'release' }}
   cancel-in-progress: true
 
 env:
@@ -31,6 +36,11 @@ jobs:
           xcrun swiftc agent-usage/agent-usage/UsageModels.swift tests/UsageParserChecks.swift -o "$RUNNER_TEMP/parser-checks"
           "$RUNNER_TEMP/parser-checks"
 
+      - name: Run credential checks
+        run: |
+          xcrun swiftc agent-usage/agent-usage/UsageModels.swift agent-usage/agent-usage/UsageClient.swift tests/UsageClientChecks.swift -o "$RUNNER_TEMP/client-checks"
+          "$RUNNER_TEMP/client-checks"
+
       - name: Build Release app
         run: |
           xcodebuild -project agent-usage/agent-usage.xcodeproj -scheme agent-usage \
@@ -42,6 +52,7 @@ jobs:
           ditto -c -k --keepParent "$RUNNER_TEMP/build/Build/Products/Release/agent-usage.app" agent-usage.zip
 
       - name: Publish rolling release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
